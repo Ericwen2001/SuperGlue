@@ -72,8 +72,8 @@ class SuperPointDataset(Dataset):
         kps1_filtered = []
         border = self.superpoint.config.get('remove_borders', 4)
         for i, k in enumerate(kps1.squeeze()):
-            if k[0] < border or k[0] >= width - border: continue
-            if k[1] < border or k[1] >= height - border: continue
+            if k[0] < border or k[0] >= width - border -10: continue  #wired bug
+            if k[1] < border or k[1] >= height - border -10: continue
             kps1_filtered.append(k)
             matches[0].append(i)
             matches[1].append(len(matches[1]))

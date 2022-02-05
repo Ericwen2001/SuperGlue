@@ -16,8 +16,6 @@ from superpoint_dataset import SuperPointDataset
 import os
 import torch.multiprocessing
 
-import pyprof
-pyprof.init()
 # torch.backends.cudnn.benchmark = True
 
 
@@ -172,45 +170,39 @@ if __name__ == '__main__':
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   
-    # Set data loader
-    if opt.detector == 'superpoint':
-        train_set = SuperPointDataset(opt.train_path, device=device, superpoint_config=config.get('superpoint', {}))
-    elif opt.detector == 'sift':
-        train_set = SIFTDataset(opt.train_path, nfeatures=opt.max_keypoints)
-    else:
-        RuntimeError('Error detector : {}'.format(opt.detector))
 
-    train_loader = torch.utils.data.DataLoader(dataset=train_set, shuffle=True, batch_size=opt.batch_size, drop_last=True)
-
-    # superpoint = SuperPoint(config.get('superpoint', {}))
     superglue = SuperGlue(config.get('supgerglue', {})) 
-    # teacher = SuperGlue(config.get('teacher', {}))
+ 
     if torch.cuda.is_available():
-        # superpoint.cuda()
+
         superglue.cuda()
         
     else:
         print("### CUDA not available ###")
-    optimizer = torch.optim.Adam(superglue.parameters(), lr=opt.learning_rate)
 
-    mean_loss = []
-
-    for epoch in range(1, opt.epoch+1):
-        epoch_loss = 0
-        superglue.train()
-        # train_loader = tqdm(train_loader)
-        time_list = []
-        for i, pred in enumerate(train_loader):
-            for k in pred:
-                if k != 'file_name' and k!='image0' and k!='image1':
-                    if type(pred[k]) == torch.Tensor:
-                        pred[k] = Variable(pred[k].cuda())
-                    else:
-                        pred[k] = Variable(torch.stack(pred[k]).cuda())
-            start_time = time.time()
-            data = superglue(pred)
-            end_time = time.time()
-            time_list.append(end_time-start_time)
-            if i == 25:
-                print(np.mean(time_list[1:]))
-                sys.exit()
+    time_list = []
+       
+    for i in range(5):     
+        pred = {'image0' : torch.rand(size=(1,1,640,480)),
+        'image1': torch.rand(size=(1,1,640,480)),
+        'keypoints0':torch.rand(size=(1,1,482,2)),
+        'keypoints1': torch.rand(size=(1,1,482,2)),
+        'descriptors0': torch.rand(256,1,482),
+        'descriptors1': torch.rand(256,1,482),
+        'scores0' : torch.rand(482,1),
+        'scores1' : torch.rand(482,1),
+        'all_matches' : torch.rand(2,1,482)
+            }
+        for k in pred:
+            if k != 'file_name' and k!='image0' and k!='image1':
+                if type(pred[k]) == torch.Tensor:
+                    pred[k] = Variable(pred[k].cuda())
+                else:
+                    pred[k] = Variable(torch.stack(pred[k]).cuda())
+          
+        start_time = time.time()
+        data = superglue(pred)
+        end_time = time.time()
+        time_list.append(end_time-start_time)
+      
+    print(np.mean(time_list[1:])  )

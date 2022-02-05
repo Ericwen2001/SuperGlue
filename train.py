@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse
 import random
+import sys
 import numpy as np
 import matplotlib.cm as cm
 import torch
@@ -9,13 +10,15 @@ import torch.nn as nn
 from torch.autograd import Variable
 
 # Datasets
-from datasets.sift_dataset import SIFTDataset
-from datasets.superpoint_dataset import SuperPointDataset
+from sift_dataset import SIFTDataset
+from superpoint_dataset import SuperPointDataset
 
 import os
 import torch.multiprocessing
 from tqdm import tqdm
-
+import torch.cuda.profiler as profiler
+import pyprof
+pyprof.init()
 # torch.backends.cudnn.benchmark = True
 
 # from models.matching import Matching
@@ -120,7 +123,7 @@ parser.add_argument(
     help='Path to the directory in which the .npz results and optional,'
             'visualizations are written')
 parser.add_argument(
-    '--learning_rate', type=int, default=0.0001,
+    '--learning_rate', type=int, default=0.00002,
     help='Learning rate')
 
     
@@ -128,13 +131,13 @@ parser.add_argument(
     '--batch_size', type=int, default=1,
     help='batch_size')
 parser.add_argument(
-    '--train_path', type=str, default='assets/freiburg_sequence', # MSCOCO2014_yingxin
+    '--train_path', type=str, default='C:/datasets/train2014/', 
     help='Path to the directory of training imgs.')
 # parser.add_argument(
 #     '--nfeatures', type=int, default=1024,
 #     help='Number of feature points to be extracted initially, in each img.')
 parser.add_argument(
-    '--epoch', type=int, default=20,
+    '--epoch', type=int, default=1,
     help='Number of epoches')
 
 
@@ -171,16 +174,20 @@ if __name__ == '__main__':
             'keypoint_threshold': opt.keypoint_threshold,
             'max_keypoints': opt.max_keypoints,
         },
-        'superglue': {
-            'weights': opt.superglue,
+        'supgerglue': {
+            'load_stat': 'True',
+            'weights': 'superglue_reproduced_+5999',
+            'training': 'True',
             'sinkhorn_iterations': opt.sinkhorn_iterations,
+            'keypoint_encoder': [32, 64, 128, 256],
             'match_threshold': opt.match_threshold,
             'descriptor_dim': detector_dims[opt.detector],
-        }
+            'GNN_layers': ['self', 'cross'] * 9
+        },
     }
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+  
     # Set data loader
     if opt.detector == 'superpoint':
         train_set = SuperPointDataset(opt.train_path, device=device, superpoint_config=config.get('superpoint', {}))
@@ -189,13 +196,15 @@ if __name__ == '__main__':
     else:
         RuntimeError('Error detector : {}'.format(opt.detector))
 
-    train_loader = torch.utils.data.DataLoader(dataset=train_set, shuffle=False, batch_size=opt.batch_size, drop_last=True)
+    train_loader = torch.utils.data.DataLoader(dataset=train_set, shuffle=True, batch_size=opt.batch_size, drop_last=True)
 
     # superpoint = SuperPoint(config.get('superpoint', {}))
-    superglue = SuperGlue(config.get('superglue', {}))
+    superglue = SuperGlue(config.get('supgerglue', {})) 
+    # teacher = SuperGlue(config.get('teacher', {}))
     if torch.cuda.is_available():
         # superpoint.cuda()
         superglue.cuda()
+        
     else:
         print("### CUDA not available ###")
     optimizer = torch.optim.Adam(superglue.parameters(), lr=opt.learning_rate)
@@ -212,9 +221,13 @@ if __name__ == '__main__':
                         pred[k] = Variable(pred[k].cuda())
                     else:
                         pred[k] = Variable(torch.stack(pred[k]).cuda())
-                
-            data = superglue(pred)
+            if i == 20: profiler.start()
 
+            data = superglue(pred)
+            if i == 20:
+                profiler.stop()
+                sys.exit()
+            continue
             for k, v in pred.items():
                 pred[k] = v[0]
             pred = {**pred, **data}
@@ -224,11 +237,12 @@ if __name__ == '__main__':
 
             superglue.zero_grad()
             Loss = pred['loss']
+        
             epoch_loss += Loss.item()
             mean_loss.append(Loss) # every 10 pairs
             Loss.backward()
             optimizer.step()
-
+            
             if (i+1) % 100 == 0:
                 print ('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}' 
                     .format(epoch, opt.epoch, i+1, len(train_loader), torch.mean(torch.stack(mean_loss)).item()))   # Loss.item()    
@@ -256,19 +270,11 @@ if __name__ == '__main__':
                     text, viz_path, stem, stem, opt.show_keypoints,
                     opt.fast_viz, opt.opencv_display, 'Matches')
 
-
-
-                # Estimate the pose and compute the pose error.
-                
-
-
-
-            if (i+1) % 5e3 == 0:
-                model_out_path = "exp/model_epoch_{}.pth".format(epoch)
-                torch.save(superglue, model_out_path)
+            if (i+1) % 1000 == 0:
+                model_out_path = "C:/SuperGlue/SuperGlue-master/SuperGlue-master/models/new_weights/superglue_reproduced_5999+{}.pth".format(i)
+                torch.save(superglue.state_dict(), model_out_path)
                 print ('Epoch [{}/{}], Step [{}/{}], Checkpoint saved to {}' 
                     .format(epoch, opt.epoch, i+1, len(train_loader), model_out_path)) 
-
 
         epoch_loss /= len(train_loader)
         model_out_path = "exp/model_epoch_{}.pth".format(epoch)

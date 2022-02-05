@@ -41,6 +41,7 @@
 # %BANNER_END%
 
 from copy import deepcopy
+from distutils.command.config import config
 from pathlib import Path
 import torch
 from torch import nn
@@ -55,8 +56,7 @@ def MLP(channels: list, do_bn=True):
             nn.Conv1d(channels[i - 1], channels[i], kernel_size=1, bias=True))
         if i < (n-1):
             if do_bn:
-                # layers.append(nn.BatchNorm1d(channels[i]))
-                layers.append(nn.InstanceNorm1d(channels[i]))
+                layers.append(nn.BatchNorm1d(channels[i]))
             layers.append(nn.ReLU())
     return nn.Sequential(*layers)
 
@@ -197,11 +197,15 @@ class SuperGlue(nn.Module):
     """
     default_config = {
         'descriptor_dim': 256,
+        'load_stat': 'False',
         'weights': 'indoor',
-        'keypoint_encoder': [32, 64, 128],
+        'keypoint_encoder': [32, 64, 128, 256],
         'GNN_layers': ['self', 'cross'] * 9,
         'sinkhorn_iterations': 100,
         'match_threshold': 0.2,
+        'knowledge_distillation': "False",
+        'student_net': "ddd",
+        'training': 'False'
     }
 
     def __init__(self, config):
@@ -222,13 +226,13 @@ class SuperGlue(nn.Module):
 
         bin_score = torch.nn.Parameter(torch.tensor(1.))
         self.register_parameter('bin_score', bin_score)
+        
+        if self.config['load_stat'] == 'True':
 
-        # assert self.config['weights'] in ['indoor', 'outdoor']
-        # path = Path(__file__).parent
-        # path = path / 'weights/superglue_{}.pth'.format(self.config['weights'])
-        # self.load_state_dict(torch.load(path))
-        # print('Loaded SuperGlue model (\"{}\" weights)'.format(
-        #     self.config['weights']))
+            path = Path(__file__).parent
+            path = path / 'weights/{}.pth'.format(self.config['weights'])
+            self.load_state_dict(torch.load(path))
+            print('Loaded SuperGlue model (\"{}\" weights)'.format(self.config['weights']))
 
     def forward(self, data):
         """Run SuperGlue on a pair of keypoints and descriptors"""
@@ -250,8 +254,7 @@ class SuperGlue(nn.Module):
                 'skip_train': True
             }
 
-        file_name = data['file_name']
-        all_matches = data['all_matches'].permute(1,2,0) # shape=torch.Size([1, 87, 2])
+        
         
         # Keypoint normalization.
         kpts0 = normalize_keypoints(kpts0, data['image0'].shape)
@@ -262,52 +265,64 @@ class SuperGlue(nn.Module):
         desc1 = desc1 + self.kenc(kpts1, torch.transpose(data['scores1'], 0, 1))
 
         # Multi-layer Transformer network.
-        desc0, desc1 = self.gnn(desc0, desc1)
+        # desc0, desc1 = self.gnn(desc0, desc1)
 
-        # Final MLP projection.
-        mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
+        # # Final MLP projection.
+        # mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
 
-        # Compute matching descriptor distance.
-        scores = torch.einsum('bdn,bdm->bnm', mdesc0, mdesc1)
-        scores = scores / self.config['descriptor_dim']**.5
+        # # Compute matching descriptor distance.
+        # scores = torch.einsum('bdn,bdm->bnm', mdesc0, mdesc1)
+        # scores = scores / self.config['descriptor_dim']**.5
 
         # Run the optimal transport.
-        scores = log_optimal_transport(
-            scores, self.bin_score,
-            iters=self.config['sinkhorn_iterations'])
+        # scores = log_optimal_transport(
+        #     scores, self.bin_score,
+        #     iters=self.config['sinkhorn_iterations'])
 
-        # Get the matches with score above "match_threshold".
-        max0, max1 = scores[:, :-1, :-1].max(2), scores[:, :-1, :-1].max(1)
-        indices0, indices1 = max0.indices, max1.indices
-        mutual0 = arange_like(indices0, 1)[None] == indices1.gather(1, indices0)
-        mutual1 = arange_like(indices1, 1)[None] == indices0.gather(1, indices1)
-        zero = scores.new_tensor(0)
-        mscores0 = torch.where(mutual0, max0.values.exp(), zero)
-        mscores1 = torch.where(mutual1, mscores0.gather(1, indices1), zero)
-        valid0 = mutual0 & (mscores0 > self.config['match_threshold'])
-        valid1 = mutual1 & valid0.gather(1, indices1)
-        indices0 = torch.where(valid0, indices0, indices0.new_tensor(-1))
-        indices1 = torch.where(valid1, indices1, indices1.new_tensor(-1))
+        # # Get the matches with score above "match_threshold".
+        # max0, max1 = scores[:, :-1, :-1].max(2), scores[:, :-1, :-1].max(1)
+        # indices0, indices1 = max0.indices, max1.indices
+        # mutual0 = arange_like(indices0, 1)[None] == indices1.gather(1, indices0)
+        # mutual1 = arange_like(indices1, 1)[None] == indices0.gather(1, indices1)
+        # zero = scores.new_tensor(0)
+        # mscores0 = torch.where(mutual0, max0.values.exp(), zero)
+        # mscores1 = torch.where(mutual1, mscores0.gather(1, indices1), zero)
+        # valid0 = mutual0 & (mscores0 > self.config['match_threshold'])
+        # valid1 = mutual1 & valid0.gather(1, indices1)
+        # indices0 = torch.where(valid0, indices0, indices0.new_tensor(-1))
+        # indices1 = torch.where(valid1, indices1, indices1.new_tensor(-1))
 
-        # check if indexed correctly
-        loss = []
-        for i in range(len(all_matches[0])):
-            x = all_matches[0][i][0]
-            y = all_matches[0][i][1]
-            loss.append(-torch.log( scores[0][x][y].exp() )) # check batch size == 1 ?
-        # for p0 in unmatched0:
-        #     loss += -torch.log(scores[0][p0][-1])
-        # for p1 in unmatched1:
-        #     loss += -torch.log(scores[0][-1][p1])
-        loss_mean = torch.mean(torch.stack(loss))
-        loss_mean = torch.reshape(loss_mean, (1, -1))
-        return {
-            'matches0': indices0[0], # use -1 for invalid match
-            'matches1': indices1[0], # use -1 for invalid match
-            'matching_scores0': mscores0[0],
-            'matching_scores1': mscores1[0],
-            'loss': loss_mean[0],
-            'skip_train': False
-        }
+        # if self.config['training'] == 'True':
+        #     all_matches = data['all_matches'].permute(1,2,0)
+        #     match_indices = all_matches[0].t().chunk(chunks=2, dim=0)
+        #     loss = -torch.log(scores[0][match_indices].exp() + 1e-6)
+        #     loss_mean = torch.mean(loss).reshape(1, -1)
+        #     loss_mean = torch.reshape(loss_mean, (1, -1))
+   
+        #     if self.config['knowledge_distillation'] == "True":
+        #         teacher_score = data['teacher_scores']
+        #         _,x,y = scores.shape
+        #         euclidena_dist = ((teacher_score[:, :-1, :-1]-scores[:, :-1, :-1])**2).sum(axis=(0,1,2))/(x*y)
+        #         # print("ori: " + str(loss_mean[0]))
+        #         # print("ed: " + str(euclidena_dist*0.01))
+        #         loss_mean[0] = loss_mean[0]*0.5 + euclidena_dist*0.01
+            
+            
+        #     return {
+        #     'scores' : scores,
+        #     'matches0': indices0[0], # use -1 for invalid match
+        #     'matches1': indices1[0], # use -1 for invalid match
+        #     'matching_scores0': mscores0[0],
+        #     'matching_scores1': mscores1[0],
+        #     'loss': loss_mean[0],
+        #     'skip_train': False
+        #     }
+        # return {
+        #     'scores' : scores,
+        #     'matches0': indices0[0], # use -1 for invalid match
+        #     'matches1': indices1[0], # use -1 for invalid match
+        #     'matching_scores0': mscores0[0],
+        #     'matching_scores1': mscores1[0]
+        # }
 
         # scores big value or small value means confidence? log can't take neg value
